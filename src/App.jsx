@@ -1,6 +1,55 @@
-import React, { useState, Suspense, useEffect } from 'react'
-import { Canvas } from '@react-three/fiber'
+import React, { useState, Suspense, useRef, useCallback, useEffect } from 'react'
+import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, useGLTF, Environment } from '@react-three/drei'
+import * as THREE from 'three'
+
+// Part category mapping
+const CATEGORY_MAP = {
+  "Wheel": "Wheels & Tires",
+  "Hubcap": "Wheels & Tires",
+  "Spoiler": "Aerodynamics",
+  "Window": "Glass & Windows",
+  "Windshield": "Glass & Windows",
+  "Sunroof": "Glass & Windows",
+  "Logo": "Branding",
+  "Badge": "Branding",
+  "Ferrari": "Branding",
+  "Mansory": "Branding",
+  "Body Panel": "Body Work",
+  "Fender": "Body Work",
+  "Bumper": "Body Work",
+  "Hood": "Body Work",
+  "Trunk": "Body Work",
+  "Door": "Body Work",
+  "Roof": "Body Work",
+  "Pillar": "Structure",
+  "Mirror": "Exterior",
+  "Light": "Lighting",
+  "Headlight": "Lighting",
+  "Fog Light": "Lighting",
+  "Tail Light": "Lighting",
+  "Brake Light": "Lighting",
+  "Turn Signal": "Lighting",
+  "Reverse Light": "Lighting",
+  "Exhaust": "Performance",
+  "Engine": "Performance",
+  "Air Intake": "Performance",
+  "Diffuser": "Aerodynamics",
+  "Splitter": "Aerodynamics",
+  "Skirt": "Body Work",
+  "Grille": "Exterior",
+  "Dashboard": "Interior",
+  "Steering": "Interior",
+  "Seat": "Interior",
+  "Console": "Interior",
+  "Gear": "Interior",
+  "Instrument": "Interior",
+  "Gauge": "Interior",
+  "Speedometer": "Interior",
+  "Wiper": "Exterior",
+  "Antenna": "Exterior",
+  "Fuel Cap": "Exterior",
+}
 
 // Name mapping - raw mesh names to friendly display names
 const NAME_MAP = {
@@ -54,12 +103,6 @@ const NAME_MAP = {
   "Object_282": "Sunroof",
   "Object_542": "Right Side Window",
 
-  // Window Interior
-  "WindowInside_Geo_lodA.001": "Interior Windshield Trim",
-  "WindowInside_Geo_lodA.002": "Interior Rear Window Trim",
-  "WindowInside_Geo_lodA.003": "Interior Left Window Trim",
-  "WindowInside_Geo_lodA.004": "Interior Right Window Trim",
-
   // Logos & Badges
   "logo 1": "Ferrari Badge (Front)",
   "logo 2": "Ferrari Badge (Rear)",
@@ -70,13 +113,13 @@ const NAME_MAP = {
   "Object_476": "Ferrari Badge (Front)",
   "Object_551": "Ferrari Prancing Horse Badge",
 
-  // Body Panels (colored parts)
+  // Body Panels
   "Coloured_Geo_lodA.001": "Body Panel (Left)",
   "Coloured_Geo_lodA.002": "Body Panel (Right)",
   "Object_545": "Body Panel (Left)",
   "Object_548": "Body Panel (Right)",
 
-  // Planes (likely mirrors or flat surfaces)
+  // Mirrors
   "Plane006": "Left Side Mirror",
   "Plane007": "Right Side Mirror",
   "Plane031": "Roof Panel",
@@ -84,7 +127,7 @@ const NAME_MAP = {
   "Object_354": "Right Side Mirror",
   "Object_357": "Left Side Mirror",
 
-  // PolySurface parts (body components)
+  // Fenders & Body
   "polySurface1013": "Front Left Fender",
   "polySurface1014": "Front Right Fender",
   "polySurface1015": "Rear Left Fender",
@@ -116,7 +159,7 @@ const NAME_MAP = {
   "Object_249": "Air Intake (Left)",
   "Object_252": "Air Intake (Right)",
 
-  // Numbered parts (lights, trim, etc.)
+  // Lights
   "1": "Headlight Assembly",
   "2": "Tail Light (Left)",
   "4": "Tail Light (Right)",
@@ -142,7 +185,7 @@ const NAME_MAP = {
   "Object_524": "Turn Signal (Front Left)",
   "Object_527": "Headlight Assembly",
 
-  // Three-digit numbered parts
+  // Hood & Trunk
   "018": "Front Grille Section",
   "019": "Front Splitter",
   "020": "Hood",
@@ -152,11 +195,9 @@ const NAME_MAP = {
   "Object_536": "Front Splitter",
   "Object_539": "Front Grille Section",
 
-  // Box/Interior parts
+  // Interior
   "Box003.001": "Center Console",
   "Object_491": "Center Console",
-
-  // Object numbered series (body panels)
   "Object010": "Dashboard",
   "Object052.001": "Steering Wheel",
   "Object057.001": "Instrument Cluster",
@@ -223,8 +264,6 @@ const NAME_MAP = {
   "Object_461": "Speedometer",
   "Object_464": "Steering Wheel",
   "Object_467": "Dashboard",
-
-  // Additional body parts
   "Object_363": "Rear Diffuser",
   "Object_366": "Hood Scoop",
   "Object_369": "Side Air Vent (Right)",
@@ -233,12 +272,11 @@ const NAME_MAP = {
   "Object_378": "Front Lip",
 }
 
-// Helper function to get friendly name or format unknown names
+// Helper function to get friendly name
 function getFriendlyName(rawName) {
   if (NAME_MAP[rawName]) {
     return NAME_MAP[rawName]
   }
-  // Format unknown Object names to be more readable
   if (rawName.startsWith("Object_")) {
     return `Body Part ${rawName.replace("Object_", "#")}`
   }
@@ -248,71 +286,318 @@ function getFriendlyName(rawName) {
   return rawName
 }
 
-// 1. The 3D Model Component
-function Model({ url, setPartName }) {
+// Helper function to get category
+function getCategory(partName) {
+  for (const [keyword, category] of Object.entries(CATEGORY_MAP)) {
+    if (partName.includes(keyword)) {
+      return category
+    }
+  }
+  return "Body Work"
+}
+
+// Default camera position
+const DEFAULT_CAMERA = { position: [4, 3, 4], target: [0, 0, 0] }
+
+// Loading component
+function Loader() {
+  return (
+    <div className="loading-container">
+      <div className="spinner"></div>
+      <p className="loading-text">Loading 3D Model...</p>
+    </div>
+  )
+}
+
+// Camera controller for reset and zoom
+function CameraController({ resetTrigger, zoomTarget, onZoomComplete }) {
+  const { camera, controls } = useThree()
+  const isAnimating = useRef(false)
+
+  useEffect(() => {
+    if (resetTrigger > 0 && controls) {
+      isAnimating.current = true
+      const startPos = camera.position.clone()
+      const endPos = new THREE.Vector3(...DEFAULT_CAMERA.position)
+      const startTarget = controls.target.clone()
+      const endTarget = new THREE.Vector3(...DEFAULT_CAMERA.target)
+
+      let progress = 0
+      const animate = () => {
+        progress += 0.05
+        if (progress >= 1) {
+          camera.position.copy(endPos)
+          controls.target.copy(endTarget)
+          controls.update()
+          isAnimating.current = false
+          return
+        }
+        const t = 1 - Math.pow(1 - progress, 3) // Ease out cubic
+        camera.position.lerpVectors(startPos, endPos, t)
+        controls.target.lerpVectors(startTarget, endTarget, t)
+        controls.update()
+        requestAnimationFrame(animate)
+      }
+      animate()
+    }
+  }, [resetTrigger, camera, controls])
+
+  useEffect(() => {
+    if (zoomTarget && controls && !isAnimating.current) {
+      isAnimating.current = true
+      const startPos = camera.position.clone()
+      const startTarget = controls.target.clone()
+
+      // Calculate zoom position (closer to target)
+      const direction = new THREE.Vector3()
+        .subVectors(camera.position, zoomTarget)
+        .normalize()
+      const endPos = zoomTarget.clone().add(direction.multiplyScalar(2))
+
+      let progress = 0
+      const animate = () => {
+        progress += 0.04
+        if (progress >= 1) {
+          camera.position.copy(endPos)
+          controls.target.copy(zoomTarget)
+          controls.update()
+          isAnimating.current = false
+          onZoomComplete?.()
+          return
+        }
+        const t = 1 - Math.pow(1 - progress, 3)
+        camera.position.lerpVectors(startPos, endPos, t)
+        controls.target.lerpVectors(startTarget, zoomTarget, t)
+        controls.update()
+        requestAnimationFrame(animate)
+      }
+      animate()
+    }
+  }, [zoomTarget, camera, controls, onZoomComplete])
+
+  return null
+}
+
+// 3D Model Component with hover effects
+function Model({ url, setPartName, setPartCategory, setZoomTarget }) {
   const { scene } = useGLTF(url)
+  const [hoveredObj, setHoveredObj] = useState(null)
+  const originalMaterials = useRef(new Map())
+
+  // Store original materials on mount
+  useEffect(() => {
+    scene.traverse((child) => {
+      if (child.isMesh && child.material) {
+        originalMaterials.current.set(child.uuid, child.material.clone())
+      }
+    })
+  }, [scene])
+
+  // Apply hover effect
+  useEffect(() => {
+    if (hoveredObj) {
+      const material = hoveredObj.material
+      if (material && material.emissive) {
+        material.emissive.setHex(0x333333)
+        material.emissiveIntensity = 0.5
+      }
+    }
+    return () => {
+      if (hoveredObj && hoveredObj.material && hoveredObj.material.emissive) {
+        hoveredObj.material.emissive.setHex(0x000000)
+        hoveredObj.material.emissiveIntensity = 0
+      }
+    }
+  }, [hoveredObj])
+
+  const handleClick = useCallback((e) => {
+    e.stopPropagation()
+    const rawName = e.object.name
+    const friendlyName = getFriendlyName(rawName)
+    const category = getCategory(friendlyName)
+
+    setPartName(friendlyName)
+    setPartCategory(category)
+
+    // Get world position for zoom
+    const worldPos = new THREE.Vector3()
+    e.object.getWorldPosition(worldPos)
+    setZoomTarget(worldPos)
+
+    // Visual feedback
+    if (e.object.material) {
+      e.object.material.color.setHex(0xff3333)
+      setTimeout(() => {
+        const original = originalMaterials.current.get(e.object.uuid)
+        if (original) {
+          e.object.material.color.copy(original.color)
+        }
+      }, 300)
+    }
+  }, [setPartName, setPartCategory, setZoomTarget])
 
   return (
     <primitive
       object={scene}
       scale={1.5}
-      onPointerDown={(e) => {
+      onPointerDown={handleClick}
+      onPointerOver={(e) => {
         e.stopPropagation()
-        // Get the raw name and convert to friendly name
-        const rawName = e.object.name
-        const friendlyName = getFriendlyName(rawName)
-
-        // A. Send the friendly name UP to the main App
-        setPartName(friendlyName)
-
-        // B. Change color for visual feedback
-        if (e.object.material) {
-          e.object.material.color.setHex(Math.random() * 0xffffff)
-        }
+        document.body.style.cursor = 'pointer'
+        setHoveredObj(e.object)
       }}
-      onPointerOver={() => document.body.style.cursor = 'pointer'}
-      onPointerOut={() => document.body.style.cursor = 'auto'}
+      onPointerOut={() => {
+        document.body.style.cursor = 'auto'
+        setHoveredObj(null)
+      }}
     />
   )
 }
 
-// 2. The Main App
+// Icons
+const ResetIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </svg>
+)
+
+const FullscreenIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+  </svg>
+)
+
+const ExitFullscreenIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
+  </svg>
+)
+
+// Main App
 export default function App() {
   const [selectedName, setSelectedName] = useState("Click a part")
+  const [selectedCategory, setSelectedCategory] = useState("")
+  const [resetTrigger, setResetTrigger] = useState(0)
+  const [zoomTarget, setZoomTarget] = useState(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const controlsRef = useRef()
+
+  // Check fullscreen state
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  // Handle fullscreen toggle
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.()
+    } else {
+      document.exitFullscreen?.()
+    }
+  }, [])
+
+  // Handle reset view
+  const handleResetView = useCallback(() => {
+    setResetTrigger(t => t + 1)
+    setZoomTarget(null)
+    setSelectedName("Click a part")
+    setSelectedCategory("")
+  }, [])
+
+  // Clear zoom target after animation
+  const handleZoomComplete = useCallback(() => {
+    setZoomTarget(null)
+  }, [])
+
+  // Detect mobile for DPR limiting
+  const isMobile = typeof window !== 'undefined' &&
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#111', position: 'relative' }}>
 
-      {/* --- UI OVERLAY --- */}
-      <div style={{
-        position: 'absolute',
-        top: '20px',
-        left: '20px',
-        color: 'white',
-        background: 'rgba(0,0,0,0.7)',
-        padding: '20px',
-        borderRadius: '10px',
-        zIndex: 10,
-        fontFamily: 'sans-serif'
-      }}>
-        <h2 style={{ margin: 0, fontSize: '1rem', color: '#888' }}>FERRARI SF90 SPIDER</h2>
-        <h1 style={{ margin: '10px 0', fontSize: '2rem', color: '#ff3333' }}>
-          {selectedName}
-        </h1>
-        <p style={{ margin: 0, fontSize: '0.8rem', color: '#888' }}>Mansory Edition</p>
+      {/* Loading overlay */}
+      {isLoading && <Loader />}
+
+      {/* UI Overlay */}
+      <div className="ui-overlay">
+        <p className="model-title">Ferrari SF90 Spider</p>
+        <h1 className="part-name">{selectedName}</h1>
+        <p className="model-subtitle">Mansory Edition</p>
+        {selectedCategory && (
+          <span className="part-category">{selectedCategory}</span>
+        )}
       </div>
 
-      {/* --- 3D SCENE --- */}
-      <Canvas camera={{ position: [3, 3, 3], fov: 50 }}>
-        <ambientLight intensity={0.5} />
-        <spotLight position={[10, 10, 10]} intensity={100} />
+      {/* Hint text */}
+      {selectedName === "Click a part" && !isLoading && (
+        <p className="hint-text">Tap or click on any part to explore</p>
+      )}
+
+      {/* Control buttons */}
+      <div className="control-buttons">
+        <button className="control-btn" onClick={handleResetView}>
+          <ResetIcon />
+          <span>Reset View</span>
+        </button>
+        <button className="control-btn icon-only" onClick={toggleFullscreen}>
+          {isFullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+        </button>
+      </div>
+
+      {/* 3D Scene */}
+      <Canvas
+        camera={{ position: DEFAULT_CAMERA.position, fov: 50 }}
+        dpr={isMobile ? [1, 1.5] : [1, 2]}
+        performance={{ min: 0.5 }}
+        gl={{
+          antialias: !isMobile,
+          powerPreference: 'high-performance',
+          alpha: false
+        }}
+        onCreated={() => setIsLoading(false)}
+      >
+        <ambientLight intensity={0.6} />
+        <spotLight position={[10, 10, 10]} intensity={80} angle={0.3} penumbra={1} />
+        <spotLight position={[-10, 5, -10]} intensity={40} angle={0.3} penumbra={1} />
 
         <Suspense fallback={null}>
-          <Model url="/ferrari_sf90spider_mansory.glb" setPartName={setSelectedName} />
+          <Model
+            url="/ferrari_sf90spider_mansory.glb"
+            setPartName={setSelectedName}
+            setPartCategory={setSelectedCategory}
+            setZoomTarget={setZoomTarget}
+          />
           <Environment preset="city" />
         </Suspense>
 
-        <OrbitControls />
+        <OrbitControls
+          ref={controlsRef}
+          makeDefault
+          enablePan={true}
+          enableZoom={true}
+          enableRotate={true}
+          minDistance={1.5}
+          maxDistance={15}
+          maxPolarAngle={Math.PI * 0.85}
+          minPolarAngle={Math.PI * 0.1}
+          dampingFactor={0.05}
+          enableDamping={true}
+          touches={{ ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }}
+          mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
+        />
+
+        <CameraController
+          resetTrigger={resetTrigger}
+          zoomTarget={zoomTarget}
+          onZoomComplete={handleZoomComplete}
+        />
       </Canvas>
     </div>
   )
